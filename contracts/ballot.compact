@@ -1,0 +1,122 @@
+// PrivateBallot: private voting for small communities.
+//
+// How it works:
+// - The organizer creates a ballot with 2 to 4 options.
+// - Each voter casts one vote. The vote itself never touches the ledger.
+//   Only a commitment (a hash of the choice and a random salt) is stored,
+//   plus a voter mark that stops the same voter from voting twice.
+// - The organizer closes the ballot. Only then can votes be revealed.
+// - Revealing a vote discloses that one choice and adds it to the public
+//   tally. The tally shows totals only. Nothing links a revealed choice
+//   back to the voter who cast it, because the salt is random per vote.
+// - Selective disclosure: a voter proves their own vote to an auditor by
+//   showing the choice and the salt. The auditor recomputes the commitment
+//   with commitmentOf and checks that it sits in the public ballots set.
+//   No other vote is exposed by that check.
+
+pragma language_version 0.28;
+
+import CompactStandardLibrary;
+
+export enum BallotState {
+  OPEN,
+  CLOSED
+}
+
+export sealed ledger organizer: Bytes<32>;
+export ledger state: BallotState;
+export ledger optionCount: Uint<8>;
+export ledger votes0: Counter;
+export ledger votes1: Counter;
+export ledger votes2: Counter;
+export ledger votes3: Counter;
+export ledger voters: Set<Bytes<32>>;
+export ledger ballots: Set<Bytes<32>>;
+export ledger revealed: Set<Bytes<32>>;
+export ledger voteCount: Counter;
+export ledger revealedCount: Counter;
+
+witness localSk(): Bytes<32>;
+
+constructor(options: Uint<8>) {
+  const _sk = localSk();
+  const pubKey = getDappPublicKey(_sk);
+  organizer = disclose(pubKey);
+  assert(options >= 2, "A ballot needs at least two options");
+  assert(options <= 4, "A ballot has at most four options");
+  optionCount = disclose(options);
+  state = BallotState.OPEN;
+}
+
+// Cast one hidden vote. The choice stays private: only its commitment
+// and the voter's one-time mark reach the ledger.
+export circuit castVote(choice: Uint<8>, salt: Bytes<32>): [] {
+  assert(state == BallotState.OPEN, "The ballot is closed");
+  assert(choice < optionCount, "Choice is not one of the options");
+  const _sk = localSk();
+  const mark = voterMark(_sk);
+  assert(!voters.member(mark), "This voter already cast a vote");
+  voters.insert(mark);
+  const commitment = voteCommitment(choice, salt);
+  ballots.insert(commitment);
+  voteCount.increment(1);
+}
+
+// Close the ballot. Only the organizer can do this.
+export circuit closeBallot(): [] {
+  const _sk = localSk();
+  const pubKey = getDappPublicKey(_sk);
+  assert(organizer == pubKey, "Only the organizer can close the ballot");
+  assert(state == BallotState.OPEN, "The ballot is already closed");
+  state = BallotState.CLOSED;
+}
+
+// Reveal one vote after close. The choice becomes public at this point
+// and counts toward the tally. Anyone can call this for any cast vote,
+// which keeps the tally from depending on the organizer.
+export circuit revealVote(choice: Uint<8>, salt: Bytes<32>): [] {
+  assert(state == BallotState.CLOSED, "The ballot is still open");
+  assert(choice < optionCount, "Choice is not one of the options");
+  const commitment = voteCommitment(choice, salt);
+  assert(ballots.member(commitment), "No such vote was cast");
+  assert(!revealed.member(commitment), "This vote was already revealed");
+  revealed.insert(commitment);
+  revealedCount.increment(1);
+  const publicChoice = disclose(choice);
+  if (publicChoice == 0) {
+    votes0.increment(1);
+  } else if (publicChoice == 1) {
+    votes1.increment(1);
+  } else if (publicChoice == 2) {
+    votes2.increment(1);
+  } else {
+    votes3.increment(1);
+  }
+}
+
+// Check on chain whether a given choice and salt match a cast vote.
+// Used for selective disclosure: the voter shows the pair to an auditor.
+export circuit verifyVote(choice: Uint<8>, salt: Bytes<32>): Boolean {
+  const commitment = voteCommitment(choice, salt);
+  return disclose(ballots.member(commitment));
+}
+
+// Recompute a vote commitment locally, without a transaction.
+// The auditor uses this to check a voter's claim against the ledger.
+export circuit commitmentOf(choice: Uint<8>, salt: Bytes<32>): Bytes<32> {
+  return disclose(voteCommitment(choice, salt));
+}
+
+circuit voteCommitment(choice: Uint<8>, salt: Bytes<32>): Bytes<32> {
+  return persistentCommit<Bytes<32>>(choice as Bytes<32>, salt);
+}
+
+circuit voterMark(_sk: Bytes<32>): Bytes<32> {
+  return persistentCommit<Bytes<32>>(pad(32, "privateballot:voter:"), _sk);
+}
+
+// Hash a public key specific to this DApp so that users cannot be tracked
+// across DApps by their key.
+circuit getDappPublicKey(_secret: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "privateballot:pk:"), _secret]);
+}

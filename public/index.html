@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrivateBallot demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; line-height: 1.5; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .sub { color: #555; margin-top: 0; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+  button { padding: 0.4rem 0.9rem; margin: 0.2rem 0.3rem 0.2rem 0; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  input[type="text"] { padding: 0.4rem; width: 100%; box-sizing: border-box; margin: 0.2rem 0 0.5rem; }
+  .mono { font-family: monospace; font-size: 0.85rem; word-break: break-all; }
+  .row { display: flex; justify-content: space-between; padding: 0.2rem 0; border-bottom: 1px solid #eee; }
+  .row:last-child { border-bottom: none; }
+  .ok { color: #1a7a2e; }
+  .bad { color: #b3261e; }
+  .muted { color: #555; font-size: 0.9rem; }
+  #log { white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; border-radius: 6px; font-size: 0.85rem; max-height: 220px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>PrivateBallot</h1>
+<p class="sub">Private voting for small communities. Votes stay hidden as commitments; only totals are revealed. This page runs the same state machine as the on-chain contract, locally in the browser, with no server.</p>
+
+<section>
+  <h2>1. Ballot</h2>
+  <label>Question
+    <input type="text" id="question" value="Which day for the next community meetup?">
+  </label>
+  <label>Options (comma separated, 2 to 4)
+    <input type="text" id="options" value="Friday, Saturday, Sunday">
+  </label>
+  <button id="createBtn">Create ballot</button>
+  <p id="ballotStatus" class="muted">No ballot yet.</p>
+</section>
+
+<section>
+  <h2>2. Cast votes</h2>
+  <p class="muted">Each voter picks an option. The page stores only the commitment. The choice and the salt stay in the voter's receipt below.</p>
+  <div id="voteButtons"></div>
+  <p id="voteStatus" class="muted"></p>
+</section>
+
+<section>
+  <h2>3. Close and reveal</h2>
+  <button id="closeBtn" disabled>Close ballot</button>
+  <button id="revealBtn" disabled>Reveal all votes</button>
+  <div id="totals"></div>
+</section>
+
+<section>
+  <h2>4. Audit (selective disclosure)</h2>
+  <p class="muted">Pick a cast vote, then check the choice and salt against the public commitments. A wrong choice fails the check.</p>
+  <label>Commitment
+    <input type="text" id="auditCommitment" placeholder="paste a commitment from the log">
+  </label>
+  <label>Choice index (0-based)
+    <input type="text" id="auditChoice" placeholder="e.g. 1">
+  </label>
+  <label>Salt
+    <input type="text" id="auditSalt" placeholder="paste the salt from the log">
+  </label>
+  <button id="auditBtn">Check vote</button>
+  <p id="auditResult"></p>
+</section>
+
+<section>
+  <h2>Log</h2>
+  <div id="log"></div>
+</section>
+
+<script>
+let ballot = null;
+let receipts = [];
+let voterCount = 0;
+
+const $ = (id) => document.getElementById(id);
+
+function log(msg) {
+  $('log').textContent += msg + '\n';
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+async function sha256Hex(text) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function randomSalt() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function commitmentOf(choice, salt) {
+  return sha256Hex('privateballot:vote:' + choice + ':' + salt);
+}
+
+function short(hash) {
+  return hash.slice(0, 12) + '...';
+}
+
+$('createBtn').addEventListener('click', () => {
+  const options = $('options').value.split(',').map((s) => s.trim()).filter(Boolean);
+  if (options.length < 2 || options.length > 4) {
+    $('ballotStatus').textContent = 'A ballot needs 2 to 4 options.';
+    return;
+  }
+  ballot = {
+    question: $('question').value.trim() || 'Ballot',
+    options,
+    state: 'OPEN',
+    commitments: new Set(),
+    revealed: new Set(),
+    tally: options.map(() => 0),
+    voteCount: 0,
+    revealedCount: 0,
+  };
+  receipts = [];
+  voterCount = 0;
+  $('ballotStatus').textContent = 'Ballot "' + ballot.question + '" is OPEN. Options: ' + options.join(', ');
+  $('voteStatus').textContent = '';
+  $('totals').innerHTML = '';
+  $('auditResult').textContent = '';
+  $('closeBtn').disabled = false;
+  $('revealBtn').disabled = true;
+  const box = $('voteButtons');
+  box.innerHTML = '';
+  options.forEach((option, i) => {
+    const btn = document.createElement('button');
+    btn.textContent = 'Vote ' + option;
+    btn.addEventListener('click', () => castVote(i));
+    box.appendChild(btn);
+  });
+  log('Ballot created: "' + ballot.question + '"');
+});
+
+async function castVote(choice) {
+  if (!ballot || ballot.state !== 'OPEN') {
+    log('Cannot vote: the ballot is not open.');
+    return;
+  }
+  voterCount += 1;
+  const voter = 'voter-' + voterCount;
+  const salt = randomSalt();
+  const commitment = await commitmentOf(choice, salt);
+  ballot.commitments.add(commitment);
+  ballot.voteCount += 1;
+  receipts.push({ voter, choice, salt, commitment });
+  $('voteStatus').textContent = ballot.voteCount + ' vote(s) cast. Tally while open: ' + ballot.tally.join(', ');
+  log(voter + ' voted. Commitment: ' + commitment + ' | salt (keep private): ' + salt);
+}
+
+$('closeBtn').addEventListener('click', () => {
+  if (!ballot || ballot.state !== 'OPEN') return;
+  ballot.state = 'CLOSED';
+  $('ballotStatus').textContent = 'Ballot "' + ballot.question + '" is CLOSED.';
+  $('closeBtn').disabled = true;
+  $('revealBtn').disabled = false;
+  log('Ballot closed. ' + ballot.voteCount + ' vote(s) to reveal.');
+});
+
+$('revealBtn').addEventListener('click', async () => {
+  if (!ballot || ballot.state !== 'CLOSED') return;
+  for (const receipt of receipts) {
+    const commitment = await commitmentOf(receipt.choice, receipt.salt);
+    if (!ballot.commitments.has(commitment) || ballot.revealed.has(commitment)) continue;
+    ballot.revealed.add(commitment);
+    ballot.revealedCount += 1;
+    ballot.tally[receipt.choice] += 1;
+    log('Revealed ' + short(commitment) + ' -> ' + ballot.options[receipt.choice]);
+  }
+  const totals = $('totals');
+  totals.innerHTML = '<h3>Totals</h3>' + ballot.options.map((option, i) =>
+    '<div class="row"><span>' + option + '</span><span>' + ballot.tally[i] + '</span></div>'
+  ).join('') + '<p class="muted">' + ballot.revealedCount + ' of ' + ballot.voteCount + ' votes revealed.</p>';
+  $('revealBtn').disabled = true;
+});
+
+$('auditBtn').addEventListener('click', async () => {
+  if (!ballot) {
+    $('auditResult').textContent = 'Create a ballot first.';
+    return;
+  }
+  const choice = Number($('auditChoice').value.trim());
+  const salt = $('auditSalt').value.trim();
+  const commitment = $('auditCommitment').value.trim();
+  if (!Number.isInteger(choice) || !salt || !commitment) {
+    $('auditResult').textContent = 'Fill in all three fields.';
+    return;
+  }
+  const recomputed = await commitmentOf(choice, salt);
+  const match = recomputed === commitment && ballot.commitments.has(commitment);
+  const el = $('auditResult');
+  el.textContent = match
+    ? 'Valid: this choice and salt match a cast vote.'
+    : 'Invalid: no cast vote matches this choice and salt.';
+  el.className = match ? 'ok' : 'bad';
+});
+
+if (!window.crypto || !window.crypto.subtle) {
+  log('This browser does not expose WebCrypto here. Serve the page over http(s) or open it in a browser that supports crypto.subtle on this origin.');
+}
+</script>
+</body>
+</html>

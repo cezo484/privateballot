@@ -1,0 +1,62 @@
+# Local Midnight network: node, indexer, proof server. Same images as the
+# hello-world example. Start with: docker compose up -d --wait
+# Stop with: docker compose down
+
+name: privateballot
+
+services:
+  proof-server:
+    image: 'midnightntwrk/proof-server:9.0.1'
+    command: ['midnight-proof-server', '-v']
+    ports:
+      - '127.0.0.1:6300:6300'
+    environment:
+      RUST_BACKTRACE: 'full'
+    healthcheck:
+      test: ['CMD-SHELL', 'echo > /dev/tcp/127.0.0.1/6300']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  indexer:
+    image: 'midnightntwrk/indexer-standalone:4.4.101'
+    ports:
+      - '127.0.0.1:8088:8088'
+    environment:
+      RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info'
+      APP__INFRA__NODE__URL: 'ws://node:9944'
+      APP__APPLICATION__NETWORK_ID: 'undeployed'
+      APP__INFRA__STORAGE__PASSWORD: 'postgres'
+      APP__INFRA__PUB_SUB__PASSWORD: 'redis'
+      APP__INFRA__LEDGER_STATE_STORAGE__PASSWORD: 'postgres'
+      APP__INFRA__SECRET: 'my-secret'
+      APP__INFRA__SPO_NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: 'e2e-test-dummy-id'
+    healthcheck:
+      test: ['CMD-SHELL', 'cat /var/run/indexer-standalone/running']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      node:
+        condition: service_healthy
+
+  node:
+    image: 'midnightntwrk/midnight-node:2.1.101'
+    ports:
+      - '127.0.0.1:9944:9944'
+    healthcheck:
+      # Healthy only once block 1 exists: indexer 4.4.x's SPO indexer exits if it starts at genesis.
+      test:
+        [
+          'CMD-SHELL',
+          'h=$$(curl -sf -H "Content-Type: application/json" -d ''{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}'' http://localhost:9944) && ! echo "$$h" | grep -q ''"number":"0x0"''',
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    environment:
+      CFG_PRESET: 'dev'

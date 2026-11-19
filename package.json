@@ -1,0 +1,44 @@
+{
+  "author": "Mehmet Ongan",
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.21.0",
+    "@midnight-ntwrk/midnight-js-contracts": "5.0.0",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0",
+    "@midnight-ntwrk/midnight-js-protocol": "5.0.0",
+    "@midnight-ntwrk/midnight-js-types": "5.0.0",
+    "@midnight-ntwrk/testkit-js": "5.0.0",
+    "@midnight-ntwrk/wallet-sdk": "2.0.0",
+    "axios": "^1.15.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^13.0.0",
+    "rxjs": "^7.8.2",
+    "ws": "^8.14.2"
+  },
+  "description": "Private voting for small communities on Midnight. Votes stay hidden in a Compact contract; only totals are revealed.",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.9",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "Apache-2.0",
+  "name": "privateballot",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "chain:demo": "npm run build && node dist/src/chain-demo.js",
+    "compile": "bash scripts/compile.sh",
+    "demo": "npm run build && node dist/src/cli.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "env:up": "docker compose up -d --wait",
+    "env:down": "docker compose down",
+    "wait:dust": "npm run build && node dist/scripts/wait-for-dust.js"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}
